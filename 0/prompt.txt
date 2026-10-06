@@ -1,0 +1,95 @@
+Without editing anything, list the files in django/db/models/ that mention "delete".
+
+---
+
+We're working in this repo on a Django bug: "Optimize .delete() to use only
+required fields" (django-11087). Do not edit any files yet. Use only the
+files in this repository: do not browse the web or recall upstream fixes.
+
+1. Read django/db/models/deletion.py and explain step by step, how
+   Collector.collect() currently fetches related objects for cascades.
+2. Quote the specific local lines where related objects are queried, and
+   say whether all columns are fetched.
+3. After those related objects are fetched, which of their fields are
+   actually used later? Cover primary keys, fields that other models'
+   foreign keys reference, signal sending, and further cascades.
+4. If anything in your answer is uncertain, say so instead of guessing.
+
+---
+
+Based on the local code you just read, list every
+situation where restricting the related-object SELECT to a subset of
+fields would be unsafe or change behavior. For each case, say whether the
+optimization should be skipped or which extra fields must be kept:
+
+- pre_delete / post_delete listeners on the related model
+- m2m_changed listeners (can_fast_delete checks them at deletion.py:138-140;
+  say whether they matter for a restricted SELECT, and why or why not)
+- related querysets that use select_related
+- related models referenced by other models through non-PK fields
+  (to_field)
+- multi-table inheritance and parent links
+- custom base managers
+
+Then propose a minimal design (no code yet): where in collect() the
+restriction would go, how to compute the set of fields to keep, and which
+conditions skip it. Quote the local lines you'd change. If something is
+uncertain, say so.
+
+---
+
+Before any implementation, write tests only in tests/delete/tests.py (and tests/delete/models.py if you need a model). Reuse existing models where possible. Cover: 1. No delete-signal listeners: when a parent is deleted, the cascaded
+   child SELECT does NOT fetch a non-required column. Use
+   CaptureQueriesContext and inspect the SQL.
+2. A pre_delete or post_delete listener on the child model: the SELECT
+   DOES fetch all columns (restriction skipped).
+3. A ForeignKey with to_field pointing at a non-PK field on the child:
+   a multi-level cascade still deletes everything correctly.
+4. Multi-table inheritance: a cascade through a child with a concrete
+   parent still deletes correctly. Report the number of queries and
+   whether the parent is re-fetched, so I can decide if skipping MTI is
+   needed.
+
+Don't change deletion.py. Run only the new tests and show that tests 1 fails for the right reason (the column IS currently fetched) and the
+others pass or fail for reasons you can explain. Also tell me whether you're keeping each extra skip condition from your design (custom managers, prefetch, MTI) and why, or dropping it.
+
+---
+
+Don't stage or commit anything yet. AGENTS.md says not to modify test
+   files, so please restore tests/delete/tests.py and
+   tests/delete/models.py to their original state (git checkout on those
+   two files only; leave .gitignore alone). Move the new tests and models
+   into a new, self-contained test app: tests/delete_required_fields/
+   with __init__.py, models.py (its own models, no changes to existing
+   apps), and tests.py. Rerun with
+   /Users/irinavardapetyan/miniforge3/envs/django11087/bin/python
+   tests/runtests.py delete_required_fields and confirm test 1 still
+   fails because the payload column is fetched, the other three behave as
+   before, and the MTI baseline is still 7 queries / 3 SELECTs. Then also
+   rerun: delete delete_regress to confirm nothing else changed.
+
+---
+
+Now implement the fix in django/db/models/deletion.py, following your
+design. Constraints:
+- Use /Users/irinavardapetyan/miniforge3/envs/django11087/bin/python for
+  all test runs.
+- Do not modify any existing test files. Only deletion.py changes, plus
+  the new tests/delete_required_fields app if a test needs adding.
+- Smallest possible change, only in the ordinary reverse-relation path
+  (replace the `elif sub_objs:` branch as you described, so the
+  restriction is applied before the rows are fetched).
+- Keep the PK plus each incoming relation's foreign_related_fields.
+- Skip the restriction when pre_delete/post_delete listeners exist or
+  select_related is set.
+- For each extra skip condition from your design (custom managers,
+  prefetch, inheritance): keep it only if a test shows it is needed. For
+  each, either show me a failing test that justifies it or leave it out
+  and tell me why. Use the MTI baseline (7 queries, 3 SELECTs) to decide
+  on inheritance.
+- Do not stage, commit, or push anything.
+Show the diff and explain each condition before running tests. Then run:
+delete_required_fields delete delete_regress model_inheritance
+many_to_many one_to_one cascade
+and report full results. If anything fails, diagnose before changing
+code.
